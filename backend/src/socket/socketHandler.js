@@ -6,6 +6,14 @@ const {
 const driverSockets = new Map();
 const passengerSockets = new Map();
 
+function removeSocketFromMap(socketMap, socketId) {
+  for (const [key, value] of socketMap.entries()) {
+    if (value === socketId) {
+      socketMap.delete(key);
+    }
+  }
+}
+
 async function initializeSocket(io) {
 
   await subscriber.subscribe("ride:requests", (message) => {
@@ -77,7 +85,26 @@ async function initializeSocket(io) {
 
     });
 
+    socket.on("ride-rejected", (ride) => {
+
+      const passengerSocket =
+        passengerSockets.get(ride.passengerId);
+
+      if (passengerSocket) {
+
+        io.to(passengerSocket).emit(
+          "ride-rejected",
+          ride
+        );
+
+      }
+
+    });
+
     socket.on("disconnect", () => {
+
+      removeSocketFromMap(driverSockets, socket.id);
+      removeSocketFromMap(passengerSockets, socket.id);
 
       console.log("Disconnected");
 
