@@ -17,7 +17,17 @@ function PassengerPage() {
 
   useEffect(() => {
     localStorage.setItem("bike-booking-passenger-id", passengerLabel);
-    socket.emit("passenger-online", passengerLabel);
+
+    const registerPassenger = () => {
+      socket.emit("passenger-online", passengerLabel);
+    };
+
+    registerPassenger();
+    socket.on("connect", registerPassenger);
+
+    return () => {
+      socket.off("connect", registerPassenger);
+    };
   }, [passengerLabel]);
 
   useEffect(() => {

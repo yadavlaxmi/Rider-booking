@@ -42,14 +42,24 @@ function DriverPage() {
   }, []);
 
   useEffect(() => {
-    if (!driverId.trim()) {
+    const trimmedDriverId = driverId.trim();
+
+    if (!trimmedDriverId) {
       return undefined;
     }
 
-    localStorage.setItem("bike-booking-driver-id", driverId.trim());
-    socket.emit("driver-online", driverId.trim());
+    localStorage.setItem("bike-booking-driver-id", trimmedDriverId);
 
-    return undefined;
+    const registerDriver = () => {
+      socket.emit("driver-online", trimmedDriverId);
+    };
+
+    registerDriver();
+    socket.on("connect", registerDriver);
+
+    return () => {
+      socket.off("connect", registerDriver);
+    };
   }, [driverId]);
 
   useEffect(() => {
