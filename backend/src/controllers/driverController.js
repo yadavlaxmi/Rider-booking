@@ -18,7 +18,8 @@ function isValidLongitude(value) {
 
 async function goOnline(req, res) {
   try {
-    const { driverId, latitude, longitude } = req.body;
+    const { latitude, longitude } = req.body;
+    const driverId = req.user?.id;
 
     const parsedLatitude = Number(latitude);
     const parsedLongitude = Number(longitude);
@@ -26,7 +27,7 @@ async function goOnline(req, res) {
     if (!driverId || latitude === undefined || longitude === undefined) {
       return res.status(400).json({
         success: false,
-        message: "driverId, latitude and longitude are required",
+        message: "latitude and longitude are required",
       });
     }
 
@@ -59,7 +60,7 @@ async function goOnline(req, res) {
 
 async function goOffline(req, res) {
   try {
-    const { driverId } = req.body;
+    const driverId = req.user?.id;
 
     if (!driverId) {
       return res.status(400).json({
@@ -144,6 +145,10 @@ async function getInactiveDriversHandler(req, res) {
 async function deleteDriver(req, res) {
   try {
     const { driverId } = req.params;
+
+    if (req.user?.id !== driverId) {
+      return res.status(403).json({ success: false, message: "You can only delete your own driver account" });
+    }
 
     await removeDriver(driverId);
 

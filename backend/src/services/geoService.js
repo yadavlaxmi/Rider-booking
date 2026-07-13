@@ -3,6 +3,28 @@ const { redisClient } = require("../config/redis");
 const DRIVER_LOCATION_KEY = "drivers:locations";
 const ACTIVE_DRIVERS_KEY = "drivers:active";
 
+function toRadians(value) {
+  return (value * Math.PI) / 180;
+}
+
+function calculateDistanceKm(pointA, pointB) {
+  const earthRadiusKm = 6371;
+  const deltaLat = toRadians(pointB.latitude - pointA.latitude);
+  const deltaLng = toRadians(pointB.longitude - pointA.longitude);
+  const lat1 = toRadians(pointA.latitude);
+  const lat2 = toRadians(pointB.latitude);
+
+  const a =
+    Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+    Math.cos(lat1) *
+      Math.cos(lat2) *
+      Math.sin(deltaLng / 2) *
+      Math.sin(deltaLng / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+}
+
 function normalizeGeoSearchMember(item) {
   if (typeof item === "string") {
     return item;
@@ -200,6 +222,15 @@ async function getNearbyActiveDrivers(latitude, longitude, radius = 10) {
   return drivers.filter(Boolean);
 }
 
+async function getDriverDistanceToPoint(driverId, latitude, longitude) {
+  const location = await getDriverLocation(driverId);
+  if (!location) {
+    return null;
+  }
+
+  return calculateDistanceKm(location, { latitude, longitude });
+}
+
 module.exports = {
   addDriverLocation,
   setDriverActive,
@@ -213,4 +244,6 @@ module.exports = {
   getInactiveDrivers,
   getNearbyDrivers,
   getNearbyActiveDrivers,
+  calculateDistanceKm,
+  getDriverDistanceToPoint,
 };

@@ -1,24 +1,51 @@
 import { useEffect, useMemo, useState } from "react";
 import api from "../services/api";
 import socket from "../socket/socket";
+import { connectSocket } from "../socket/socket";
+import MapPicker from "../components/MapPicker";
+import RouteMap from "../components/RouteMap";
 
 function PassengerPage() {
-  const [passengerId, setPassengerId] = useState(() => localStorage.getItem("bike-booking-passenger-id") || `passenger-${Math.random().toString(36).slice(2, 8)}`);
+  const [passengerId, setPassengerId] = useState(() => {
+    const userRaw = localStorage.getItem("bike-booking-user");
+    try {
+      const user = userRaw ? JSON.parse(userRaw) : null;
+      return user?.role === "passenger" ? user.id : "";
+    } catch {
+      return "";
+    }
+  });
   const [latitude, setLatitude] = useState("");
   const [longitude, setLongitude] = useState("");
+  const [dropLatitude, setDropLatitude] = useState("");
+  const [dropLongitude, setDropLongitude] = useState("");
   const [radius, setRadius] = useState("10");
   const [drivers, setDrivers] = useState([]);
+  const [quote, setQuote] = useState(null);
   const [loading, setLoading] = useState(false);
   const [bookingDriverId, setBookingDriverId] = useState("");
   const [bookingNote, setBookingNote] = useState("");
   const [rideStatus, setRideStatus] = useState("");
+  const [activeRide, setActiveRide] = useState(null);
 
   const passengerLabel = useMemo(() => passengerId.trim() || "anonymous-passenger", [passengerId]);
 
   useEffect(() => {
-    localStorage.setItem("bike-booking-passenger-id", passengerLabel);
+    const loadActiveRide = async () => {
+      try {
+        const res = await api.get("/rides/me/active");
+        setActiveRide(res.data?.ride || null);
+      } catch (error) {
+        setActiveRide(null);
+      }
+    };
 
+    loadActiveRide();
+  }, []);
+
+  useEffect(() => {
     const registerPassenger = () => {
+      connectSocket();
       socket.emit("passenger-online", passengerLabel);
     };
 
@@ -31,14 +58,42 @@ function PassengerPage() {
   }, [passengerLabel]);
 
   useEffect(() => {
+    const describeRideStatus = (ride) => {
+      switch (ride.status) {
+        case "requested":
+          return `Ride request sent to ${ride.driverId}. Waiting for driver response.`;
+        case "accepted":
+          return `Driver ${ride.driverId} accepted your booking and is coming.`;
+        case "rejected":
+          return `Driver ${ride.driverId} rejected your ride request.`;
+        case "arrived":
+          return `Driver ${ride.driverId} has arrived at your pickup point.`;
+        case "started":
+          return `Your ride with ${ride.driverId} has started.`;
+        case "completed":
+          return `Your ride with ${ride.driverId} is completed.`;
+        case "cancelled":
+          return `Your ride with ${ride.driverId} was cancelled.`;
+        default:
+          return `Ride status: ${ride.status}`;
+      }
+    };
+
+    const handleRideRequested = (ride) => {
+      setActiveRide(ride);
+      setBookingDriverId(ride.driverId);
+      setBookingNote(describeRideStatus(ride));
+      setRideStatus("");
+    };
+
     const handleRideConfirmed = (ride) => {
       if (ride.passengerId !== passengerLabel) {
         return;
       }
 
-      setRideStatus(`Driver ${ride.driverId} accepted your booking and is coming.`);
+      setActiveRide(ride);
+      setRideStatus(describeRideStatus(ride));
       setBookingNote("");
-      setBookingDriverId("");
     };
 
     const handleRideRejected = (ride) => {
@@ -46,17 +101,43 @@ function PassengerPage() {
         return;
       }
 
-      setRideStatus(`Driver ${ride.driverId} rejected your ride request.`);
+      setActiveRide(null);
+      setRideStatus(describeRideStatus(ride));
       setBookingNote("");
       setBookingDriverId("");
     };
 
+    const handleRideStatusUpdated = (ride) => {
+      if (ride.passengerId !== passengerLabel) {
+        return;
+      }
+      if (["completed", "cancelled", "rejected"].includes(ride.status)) {
+        setActiveRide(null);
+        setBookingDriverId("");
+      } else {
+        setActiveRide(ride);
+        setBookingDriverId(ride.driverId);
+      }
+      setRideStatus(describeRideStatus(ride));
+    };
+
+    const handleRideError = (payload) => {
+      setBookingNote(payload?.message || "Ride request failed");
+      setBookingDriverId("");
+    };
+
+    socket.on("ride-requested", handleRideRequested);
     socket.on("ride-confirmed", handleRideConfirmed);
     socket.on("ride-rejected", handleRideRejected);
+    socket.on("ride-status-updated", handleRideStatusUpdated);
+    socket.on("ride-error", handleRideError);
 
     return () => {
+      socket.off("ride-requested", handleRideRequested);
       socket.off("ride-confirmed", handleRideConfirmed);
       socket.off("ride-rejected", handleRideRejected);
+      socket.off("ride-status-updated", handleRideStatusUpdated);
+      socket.off("ride-error", handleRideError);
     };
   }, [passengerLabel]);
 
@@ -76,6 +157,8 @@ function PassengerPage() {
         radius: Number(radius),
       });
 
+       console.log("Nearby Drivers =>", res.data.drivers);
+
       setDrivers(res.data.drivers || []);
       setBookingNote(`Found ${res.data.total || 0} active drivers nearby.`);
     } catch (error) {
@@ -86,28 +169,69 @@ function PassengerPage() {
     }
   };
 
-  const bookDriver = (driver) => {
+  const getQuote = async () => {
+    try {
+      if (!latitude || !longitude || !dropLatitude || !dropLongitude) {
+        setBookingNote("Pickup and drop coordinates are required for quote.");
+        return;
+      }
+
+      setLoading(true);
+      setBookingNote("");
+
+      const res = await api.post("/rides/quote", {
+        pickupLatitude: Number(latitude),
+        pickupLongitude: Number(longitude),
+        dropLatitude: Number(dropLatitude),
+        dropLongitude: Number(dropLongitude),
+        radius: Number(radius),
+      });
+
+      setQuote(res.data?.quote || null);
+      const suggestedDriver = res.data?.quote?.suggestedDriverId;
+      setBookingNote(
+        suggestedDriver
+          ? `Estimated fare ready. Suggested driver: ${suggestedDriver}.`
+          : "Estimated fare ready, but no active driver is suggested yet."
+      );
+    } catch (error) {
+      setQuote(null);
+      setBookingNote(error.response?.data?.message || "Could not calculate fare");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+ const bookDriver = async (driver) => {
+  try {
     if (!latitude || !longitude) {
       setBookingNote("Enter pickup latitude and longitude before booking.");
       return;
     }
 
-    const ride = {
-      rideId: `${passengerLabel}-${driver.driverId}-${Date.now()}`,
-      passengerId: passengerLabel,
-      driverId: driver.driverId,
+    const res = await api.post("/rides/request", {
       pickupLatitude: Number(latitude),
       pickupLongitude: Number(longitude),
-      status: "requested",
-      createdAt: new Date().toISOString(),
-    };
+      dropLatitude: Number(dropLatitude),
+      dropLongitude: Number(dropLongitude),
+      driverId: driver.driverId || quote?.suggestedDriverId,
+      radius: Number(radius),
+    });
+
+    const ride = res.data.ride;
 
     socket.emit("request-ride", ride);
-    setBookingDriverId(driver.driverId);
-    setBookingNote(`Ride request sent to ${driver.driverId}. Waiting for driver confirmation.`);
-    setRideStatus("");
-  };
 
+    setActiveRide(ride);
+    setBookingDriverId(ride.driverId);
+
+    setBookingNote(
+      `Ride request sent to ${ride.driverId}. Waiting for driver confirmation.`
+    );
+  } catch (err) {
+    setBookingNote(err.response?.data?.message || "Booking failed");
+  }
+};
   return (
     <div className="page-shell">
       <section className="hero-card">
@@ -129,6 +253,14 @@ function PassengerPage() {
             <span>Nearby</span>
             <strong>{drivers.length}</strong>
           </div>
+          <div className="stat-card">
+            <span>Active ride</span>
+            <strong>{activeRide?.status || "none"}</strong>
+          </div>
+          <div className="stat-card">
+            <span>Fare</span>
+            <strong>{quote?.estimatedFare ? `Rs ${quote.estimatedFare}` : "-"}</strong>
+          </div>
         </div>
       </section>
 
@@ -146,11 +278,7 @@ function PassengerPage() {
         <div className="form-grid form-grid--three">
           <label>
             <span>Passenger ID</span>
-            <input
-              value={passengerId}
-              onChange={(event) => setPassengerId(event.target.value)}
-              placeholder="passenger-001"
-            />
+            <input value={passengerId} readOnly placeholder="passenger-001" />
           </label>
 
           <label>
@@ -179,11 +307,84 @@ function PassengerPage() {
               placeholder="10"
             />
           </label>
+
+          <label>
+            <span>Drop Latitude</span>
+            <input
+              value={dropLatitude}
+              onChange={(event) => setDropLatitude(event.target.value)}
+              placeholder="28.6500"
+            />
+          </label>
+
+          <label>
+            <span>Drop Longitude</span>
+            <input
+              value={dropLongitude}
+              onChange={(event) => setDropLongitude(event.target.value)}
+              placeholder="77.2300"
+            />
+          </label>
+        </div>
+
+        <div className="card-actions" style={{ marginTop: 16 }}>
+          <button className="primary-button" onClick={findDrivers} type="button" disabled={loading}>
+            {loading ? "Searching..." : "Find drivers"}
+          </button>
+          <button className="secondary-button" onClick={getQuote} type="button" disabled={loading}>
+            {loading ? "Calculating..." : "Get fare quote"}
+          </button>
+          <button
+            className="ghost-button"
+            onClick={() => bookDriver({ driverId: quote?.suggestedDriverId || "" })}
+            type="button"
+            disabled={loading || Boolean(activeRide) || !quote}
+          >
+            Book suggested driver
+          </button>
         </div>
 
         {bookingNote ? <div className="feedback-banner">{bookingNote}</div> : null}
         {rideStatus ? <div className="feedback-banner">{rideStatus}</div> : null}
+        {activeRide ? (
+          <div className="feedback-banner">
+            Current ride: `{activeRide.rideId}` with `{activeRide.driverId}` is `{activeRide.status}`.
+          </div>
+        ) : null}
+        {quote ? (
+          <div className="feedback-banner">
+            Estimated fare: Rs {quote.estimatedFare} for {quote.routeDistanceKm} km, about {quote.estimatedMinutes} min.
+          </div>
+        ) : null}
       </section>
+
+      <div className="dashboard-grid">
+        <MapPicker
+          title="Pickup selector"
+          latitude={latitude}
+          longitude={longitude}
+          onSelect={({ latitude: nextLat, longitude: nextLng }) => {
+            setLatitude(String(nextLat));
+            setLongitude(String(nextLng));
+          }}
+        />
+        <MapPicker
+          title="Drop selector"
+          latitude={dropLatitude}
+          longitude={dropLongitude}
+          onSelect={({ latitude: nextLat, longitude: nextLng }) => {
+            setDropLatitude(String(nextLat));
+            setDropLongitude(String(nextLng));
+          }}
+        />
+      </div>
+
+      <RouteMap
+        title="Passenger route"
+        pickup={latitude && longitude ? { latitude, longitude } : null}
+        drop={dropLatitude && dropLongitude ? { latitude: dropLatitude, longitude: dropLongitude } : null}
+        polyline={activeRide?.routePolyline?.length ? activeRide.routePolyline : quote?.routePolyline || []}
+      />
 
       <section className="panel panel-list">
         <div className="panel-header">
@@ -226,9 +427,9 @@ function PassengerPage() {
                       className="primary-button"
                       type="button"
                       onClick={() => bookDriver(driver)}
-                      disabled={isBooking}
+                      disabled={isBooking || Boolean(activeRide)}
                     >
-                      {isBooking ? "Booking..." : "Book ride"}
+                      {activeRide ? "Ride active" : isBooking ? "Booking..." : "Book ride"}
                     </button>
                   </div>
                 </article>

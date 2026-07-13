@@ -1,14 +1,25 @@
 import { useEffect, useMemo, useState } from "react";
 import api from "../services/api";
 import socket from "../socket/socket";
+import { connectSocket } from "../socket/socket";
+import RouteMap from "../components/RouteMap";
 
 function DriverPage() {
-  const [driverId, setDriverId] = useState(() => localStorage.getItem("bike-booking-driver-id") || "");
+  const [driverId, setDriverId] = useState(() => {
+    const userRaw = localStorage.getItem("bike-booking-user");
+    try {
+      const user = userRaw ? JSON.parse(userRaw) : null;
+      return user?.role === "driver" ? user.id : "";
+    } catch {
+      return "";
+    }
+  });
   const [latitude, setLatitude] = useState("");
   const [longitude, setLongitude] = useState("");
   const [activeDrivers, setActiveDrivers] = useState([]);
   const [inactiveDrivers, setInactiveDrivers] = useState([]);
   const [incomingRides, setIncomingRides] = useState([]);
+  const [currentRide, setCurrentRide] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState("");
@@ -16,6 +27,10 @@ function DriverPage() {
   const totalDrivers = useMemo(
     () => activeDrivers.length + inactiveDrivers.length,
     [activeDrivers.length, inactiveDrivers.length]
+  );
+  const currentDriverLocation = useMemo(
+    () => activeDrivers.find((driver) => driver.driverId === driverId) || null,
+    [activeDrivers, driverId]
   );
 
   const loadDrivers = async () => {
@@ -38,7 +53,21 @@ function DriverPage() {
   };
 
   useEffect(() => {
+    const loadActiveRide = async () => {
+      try {
+        const res = await api.get("/rides/me/active");
+        const ride = res.data?.ride || null;
+        setCurrentRide(ride);
+        if (ride?.status === "requested") {
+          setIncomingRides([ride]);
+        }
+      } catch (error) {
+        setCurrentRide(null);
+      }
+    };
+
     loadDrivers();
+    loadActiveRide();
   }, []);
 
   useEffect(() => {
@@ -48,9 +77,8 @@ function DriverPage() {
       return undefined;
     }
 
-    localStorage.setItem("bike-booking-driver-id", trimmedDriverId);
-
     const registerDriver = () => {
+      connectSocket();
       socket.emit("driver-online", trimmedDriverId);
     };
 
@@ -63,7 +91,30 @@ function DriverPage() {
   }, [driverId]);
 
   useEffect(() => {
+    const describeRideStatus = (ride) => {
+      switch (ride.status) {
+        case "requested":
+          return `New booking request from ${ride.passengerId}.`;
+        case "accepted":
+          return `You accepted the booking for passenger ${ride.passengerId}.`;
+        case "rejected":
+          return `You rejected the booking for passenger ${ride.passengerId}.`;
+        case "arrived":
+          return `You have arrived for passenger ${ride.passengerId}.`;
+        case "started":
+          return `Ride for passenger ${ride.passengerId} has started.`;
+        case "completed":
+          return `Ride for passenger ${ride.passengerId} has completed.`;
+        case "cancelled":
+          return `Ride for passenger ${ride.passengerId} was cancelled.`;
+        default:
+          return `Ride status: ${ride.status}`;
+      }
+    };
+
     const handleRideRequest = (ride) => {
+      console.log("🔥 RIDE RECEIVED", ride);
+
       setIncomingRides((current) => {
         const nextRides = current.filter((item) => item.rideId !== ride.rideId);
         return [
@@ -75,34 +126,61 @@ function DriverPage() {
         ];
       });
 
-      setFeedback(`New booking request from ${ride.passengerId} for ${ride.driverId}`);
+      setCurrentRide(ride);
+      setFeedback(describeRideStatus(ride));
     };
 
     const handleRideConfirmed = (ride) => {
-      setFeedback(`Passenger ${ride.passengerId} confirmed that driver ${ride.driverId} accepted.`);
+      setCurrentRide(ride);
+      setFeedback(describeRideStatus(ride));
       setIncomingRides((current) => current.filter((item) => item.rideId !== ride.rideId));
     };
 
     const handleRideRejected = (ride) => {
-      setFeedback(`Ride request for passenger ${ride.passengerId} was rejected.`);
+      setCurrentRide(null);
+      setFeedback(describeRideStatus(ride));
       setIncomingRides((current) => current.filter((item) => item.rideId !== ride.rideId));
+    };
+
+    const handleRideStatusUpdated = (ride) => {
+      if (ride.driverId !== driverId.trim()) {
+        return;
+      }
+
+      if (["completed", "cancelled", "rejected"].includes(ride.status)) {
+        setCurrentRide(null);
+      } else {
+        setCurrentRide(ride);
+      }
+      setFeedback(describeRideStatus(ride));
+      if (ride.status !== "requested") {
+        setIncomingRides((current) => current.filter((item) => item.rideId !== ride.rideId));
+      }
+    };
+
+    const handleRideError = (payload) => {
+      setFeedback(payload?.message || "Ride action failed");
     };
 
     socket.on("ride-request", handleRideRequest);
     socket.on("ride-confirmed", handleRideConfirmed);
     socket.on("ride-rejected", handleRideRejected);
+    socket.on("ride-status-updated", handleRideStatusUpdated);
+    socket.on("ride-error", handleRideError);
 
     return () => {
       socket.off("ride-request", handleRideRequest);
       socket.off("ride-confirmed", handleRideConfirmed);
       socket.off("ride-rejected", handleRideRejected);
+      socket.off("ride-status-updated", handleRideStatusUpdated);
+      socket.off("ride-error", handleRideError);
     };
-  }, []);
+  }, [driverId]);
 
   const goOnline = async () => {
     try {
-      if (!driverId || !latitude || !longitude) {
-        setFeedback("Driver ID, latitude, and longitude are required.");
+      if (!latitude || !longitude) {
+        setFeedback("Latitude and longitude are required.");
         return;
       }
 
@@ -110,12 +188,11 @@ function DriverPage() {
       setFeedback("");
 
       const res = await api.post("/drivers/online", {
-        driverId: driverId.trim(),
         latitude: Number(latitude),
         longitude: Number(longitude),
       });
 
-      localStorage.setItem("bike-booking-driver-id", driverId.trim());
+      connectSocket();
       socket.emit("driver-online", driverId.trim());
       setFeedback(res.data.message || "Driver marked active.");
       setDriverId(driverId.trim());
@@ -157,12 +234,12 @@ function DriverPage() {
       setFeedback("");
 
       const res = await api.post("/drivers/online", {
-        driverId: driver.driverId,
         latitude: Number(driver.latitude),
         longitude: Number(driver.longitude),
       });
 
       if (driver.driverId === driverId) {
+        connectSocket();
         socket.emit("driver-online", driver.driverId);
       }
 
@@ -195,11 +272,20 @@ function DriverPage() {
   const respondToRide = (ride, accepted) => {
     socket.emit(accepted ? "ride-accepted" : "ride-rejected", ride);
     setIncomingRides((current) => current.filter((item) => item.rideId !== ride.rideId));
-    setFeedback(
-      accepted
-        ? `You accepted the booking for passenger ${ride.passengerId}.`
-        : `You rejected the booking for passenger ${ride.passengerId}.`
-    );
+    if (!accepted) {
+      setCurrentRide(null);
+    }
+    setFeedback(accepted ? "Accepting ride..." : "Rejecting ride...");
+  };
+
+  const updateCurrentRideStatus = async (status) => {
+    if (!currentRide?.rideId) {
+      return;
+    }
+    setSaving(true);
+    socket.emit("ride-update-status", { rideId: currentRide.rideId, status });
+    setFeedback(`Updating ride to ${status}...`);
+    setTimeout(() => setSaving(false), 400);
   };
 
   const DriverList = ({
@@ -304,6 +390,10 @@ function DriverPage() {
             <span>Inactive</span>
             <strong>{inactiveDrivers.length}</strong>
           </div>
+          <div className="stat-card">
+            <span>Ride</span>
+            <strong>{currentRide?.status || "none"}</strong>
+          </div>
         </div>
       </section>
 
@@ -323,7 +413,7 @@ function DriverPage() {
             <span>Driver ID</span>
             <input
               value={driverId}
-              onChange={(event) => setDriverId(event.target.value)}
+              readOnly
               placeholder="driver_001"
             />
           </label>
@@ -371,6 +461,11 @@ function DriverPage() {
         </div>
 
         {feedback ? <div className="feedback-banner">{feedback}</div> : null}
+        {currentRide ? (
+          <div className="feedback-banner">
+            Current ride: `{currentRide.rideId}` for passenger `{currentRide.passengerId}` is `{currentRide.status}`.
+          </div>
+        ) : null}
       </section>
 
       <section className="panel panel-list">
@@ -414,6 +509,80 @@ function DriverPage() {
           </div>
         )}
       </section>
+
+      {currentRide ? (
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Current ride</p>
+              <h2>{currentRide.status}</h2>
+            </div>
+            <span className="status-pill status-pill--active">{currentRide.rideId}</span>
+          </div>
+
+          <div className="driver-meta">
+            <span>Passenger: {currentRide.passengerId}</span>
+            <span>Pickup: {currentRide.pickupLatitude}, {currentRide.pickupLongitude}</span>
+            <span>Drop: {currentRide.dropLatitude}, {currentRide.dropLongitude}</span>
+            <span>Fare: {currentRide.fareEstimate ? `Rs ${currentRide.fareEstimate}` : "-"}</span>
+          </div>
+
+          <div className="card-actions">
+            <button
+              className="primary-button"
+              type="button"
+              disabled={saving || currentRide.status !== "accepted"}
+              onClick={() => updateCurrentRideStatus("arrived")}
+            >
+              Mark Arrived
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              disabled={saving || currentRide.status !== "arrived"}
+              onClick={() => updateCurrentRideStatus("started")}
+            >
+              Start Ride
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              disabled={saving || currentRide.status !== "started"}
+              onClick={() => updateCurrentRideStatus("completed")}
+            >
+              Complete Ride
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={saving || ["completed", "cancelled", "rejected"].includes(currentRide.status)}
+              onClick={() => updateCurrentRideStatus("cancelled")}
+            >
+              Cancel Ride
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      <RouteMap
+        title="Driver direction"
+        pickup={
+          currentRide
+            ? { latitude: currentRide.pickupLatitude, longitude: currentRide.pickupLongitude }
+            : null
+        }
+        drop={
+          currentRide && currentRide.dropLatitude !== null && currentRide.dropLongitude !== null
+            ? { latitude: currentRide.dropLatitude, longitude: currentRide.dropLongitude }
+            : null
+        }
+        driver={
+          currentDriverLocation
+            ? { latitude: currentDriverLocation.latitude, longitude: currentDriverLocation.longitude }
+            : null
+        }
+        polyline={currentRide?.routePolyline || []}
+      />
 
       <div className="dashboard-grid">
         <DriverList

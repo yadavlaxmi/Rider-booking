@@ -3,6 +3,8 @@ const cors = require("cors");
 
 const driverRoutes = require("./routes/driverRoutes");
 const passengerRoutes = require("./routes/passengerRoutes");
+const authRoutes = require("./routes/authRoutes");
+const rideRoutes = require("./routes/rideRoutes");
 
 const app = express();
 
@@ -16,7 +18,9 @@ app.get("/", (req, res) => {
   });
 });
 
+app.use("/auth", authRoutes);
 app.use("/drivers", driverRoutes);
 app.use("/passengers", passengerRoutes);
+app.use("/rides", rideRoutes);
 
 module.exports = app;
