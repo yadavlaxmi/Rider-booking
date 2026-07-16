@@ -3,8 +3,8 @@ const { signToken } = require("../middleware/authMiddleware");
 
 async function signup(req, res) {
   try {
-    const { role, email, name, password } = req.body || {};
-    const user = await createUser({ role, email, name, password });
+    const { role, email, name, password, adminSignupKey } = req.body || {};
+    const user = await createUser({ role, email, name, password, adminSignupKey });
 
     const token = signToken({
       sub: user.id,
@@ -21,11 +21,19 @@ async function signup(req, res) {
 
 async function login(req, res) {
   try {
-    const { email, password } = req.body || {};
+    const { email, password, role } = req.body || {};
     const user = await verifyUserPassword({ email, password });
 
     if (!user) {
       return res.status(401).json({ success: false, message: "Invalid email or password" });
+    }
+
+    const selectedRole = String(role || "").trim().toLowerCase();
+    if (selectedRole && selectedRole !== user.role) {
+      return res.status(403).json({
+        success: false,
+        message: `This account is registered as ${user.role}. Select the correct role to continue.`,
+      });
     }
 
     const token = signToken({
@@ -60,4 +68,3 @@ module.exports = {
   login,
   me,
 };
-

@@ -8,6 +8,7 @@ const {
 const { getNearbyActiveDrivers } = require("../services/geoService");
 const { getRouteDetails } = require("../services/mapsService");
 const { calculateFare } = require("../services/fareService");
+const { publisher } = require("../services/pubSubService");
 
 function isFiniteNumber(value) {
   return Number.isFinite(value);
@@ -51,6 +52,17 @@ async function requestRide(req, res) {
       return res.status(400).json({ success: false, message: "No nearby driver available" });
     }
 
+    const nearbyDriverIds = nearbyDrivers.map((item) => item.driverId);
+    if (!nearbyDriverIds.includes(driverId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Selected driver is not active or is outside the search radius",
+      });
+    }
+
+    // A booking is sent only to the driver selected by the passenger.
+    const candidateDriverIds = [driverId];
+
     const ride = await createRide({
       passengerId,
       driverId,
@@ -63,8 +75,12 @@ async function requestRide(req, res) {
       estimatedMinutes: route.estimatedMinutes,
       routePolyline: route.polyline,
       routeSteps: route.steps,
-      candidateDriverIds: nearbyDrivers.map((item) => item.driverId),
+      candidateDriverIds,
     });
+
+    // Dispatch is owned by the API so a temporary passenger socket disconnect
+    // cannot prevent the selected driver from receiving the booking.
+    await publisher.publish("ride:requests", JSON.stringify(ride));
 
     return res.json({ success: true, ride });
   } catch (err) {
@@ -176,4 +192,3 @@ module.exports = {
   myActiveRide,
   updateRideStatus,
 };
-

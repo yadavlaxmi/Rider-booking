@@ -3,13 +3,11 @@ const {
   subscriber,
 } = require("../services/pubSubService");
 const jwt = require("jsonwebtoken");
-const { createRide, transitionRide, assignNextCandidateDriver, getRideById } = require("../services/rideService");
-const { getNearbyActiveDrivers, getDriverDistanceToPoint } = require("../services/geoService");
-const { getRouteDetails } = require("../services/mapsService");
-const { calculateFare } = require("../services/fareService");
+const { transitionRide, assignNextCandidateDriver, getRideById } = require("../services/rideService");
+const { getDriverDistanceToPoint } = require("../services/geoService");
 
-const driverSockets = new Map();
-const passengerSockets = new Map();
+const driverSockets = new Map(); // Map of driverId -> Set of socketIds
+const passengerSockets = new Map(); // Map of passengerId -> Set of socketIds
 const MAX_ACCEPT_DISTANCE_KM = Number(process.env.MAX_ACCEPT_DISTANCE_KM || 8);
 const REQUEST_TIMEOUT_MS = Number(process.env.RIDE_REQUEST_TIMEOUT_MS || 20000);
 
@@ -22,16 +20,15 @@ function getJwtSecret() {
 }
 
 function removeSocketFromMap(socketMap, socketId) {
-  for (const [key, value] of socketMap.entries()) {
-    if (value === socketId) {
-      socketMap.delete(key);
+  for (const [key, set] of socketMap.entries()) {
+    if (set instanceof Set && set.has(socketId)) {
+      set.delete(socketId);
+      if (set.size === 0) {
+        socketMap.delete(key);
+      }
       break;
     }
   }
-}
-
-function isFiniteCoordinate(value) {
-  return Number.isFinite(Number(value));
 }
 
 async function publishRideRequest(ride) {
@@ -48,20 +45,17 @@ async function tryDispatchNextDriver(io, ride) {
       nextStatus: "rejected",
     });
 
-    const passengerSocket = passengerSockets.get(finalRide.passengerId);
-    if (passengerSocket) {
-      io.to(passengerSocket).emit("ride-rejected", finalRide);
-      io.to(passengerSocket).emit("ride-status-updated", finalRide);
-      io.to(passengerSocket).emit("ride.rejected", finalRide);
-    }
+    console.log("Passenger Map:", [...passengerSockets.entries()].map(([k, s]) => [k, [...s]]));
+    console.log("Ride Passenger:", finalRide.passengerId);
+    
+    io.to(finalRide.passengerId).emit("ride-rejected", finalRide);
+    io.to(finalRide.passengerId).emit("ride-status-updated", finalRide);
+    io.to(finalRide.passengerId).emit("ride.rejected", finalRide);
     return finalRide;
   }
 
   await publishRideRequest(reassignedRide);
-  const passengerSocket = passengerSockets.get(reassignedRide.passengerId);
-  if (passengerSocket) {
-    io.to(passengerSocket).emit("ride-status-updated", reassignedRide);
-  }
+  io.to(reassignedRide.passengerId).emit("ride-status-updated", reassignedRide);
   return reassignedRide;
 }
 
@@ -111,24 +105,26 @@ async function initializeSocket(io) {
       console.log("Redis Received:", message);
 
       const data = JSON.parse(message);
+      scheduleRideTimeout(io, data.rideId);
 
       console.log("Requested Driver:", data.driverId);
       console.log("Registered Drivers:", [
         ...driverSockets.entries(),
-      ]);
+      ].map(([k, s]) => [k, [...s]]));
 
-      const socketId = driverSockets.get(data.driverId);
+      const driverSet = driverSockets.get(data.driverId);
+      const isOnline = driverSet && driverSet.size > 0;
 
-      console.log("Socket Found:", socketId);
+      console.log("Sockets Found:", driverSet ? [...driverSet] : null);
 
-      if (!socketId) {
+      if (!isOnline) {
         console.log("❌ Driver is not online");
         return;
       }
 
       console.log("✅ Sending ride request to driver");
 
-      io.to(socketId).emit("ride-request", data);
+      io.to(data.driverId).emit("ride-request", data);
     } catch (err) {
       console.error("Redis Subscribe Error:", err);
     }
@@ -137,15 +133,24 @@ async function initializeSocket(io) {
   io.on("connection", (socket) => {
     console.log("\n🟢 Connected:", socket.id, socket.user?.id, socket.user?.role);
 
+    if (socket.user?.id) {
+      socket.join(socket.user.id);
+    }
+
     /**
      * Driver Online
      */
     socket.on("driver-online", (driverId) => {
       if (socket.user?.role !== "driver") return;
-      driverSockets.set(socket.user.id, socket.id);
+      socket.join(socket.user.id);
+
+      if (!driverSockets.has(socket.user.id)) {
+        driverSockets.set(socket.user.id, new Set());
+      }
+      driverSockets.get(socket.user.id).add(socket.id);
 
       console.log("Driver Registered:", socket.user.id);
-      console.log("Drivers Map:", [...driverSockets.entries()]);
+      console.log("Drivers Map:", [...driverSockets.entries()].map(([k, s]) => [k, [...s]]));
     });
 
     /**
@@ -153,90 +158,26 @@ async function initializeSocket(io) {
      */
     socket.on("passenger-online", (passengerId) => {
       if (socket.user?.role !== "passenger") return;
-      passengerSockets.set(socket.user.id, socket.id);
+      socket.join(socket.user.id);
+
+      if (!passengerSockets.has(socket.user.id)) {
+        passengerSockets.set(socket.user.id, new Set());
+      }
+      passengerSockets.get(socket.user.id).add(socket.id);
 
       console.log("Passenger Registered:", socket.user.id);
-      console.log("Passengers Map:", [...passengerSockets.entries()]);
-    });
-
-    /**
-     * Passenger requests ride
-     */
-    socket.on("request-ride", async (payload) => {
-      if (socket.user?.role !== "passenger") return;
-      console.log("\n🚖 Ride Request Received");
-      console.log(payload);
-
-      try {
-        const pickupLatitude = Number(payload.pickupLatitude);
-        const pickupLongitude = Number(payload.pickupLongitude);
-        const dropLatitude = isFiniteCoordinate(payload.dropLatitude)
-          ? Number(payload.dropLatitude)
-          : pickupLatitude;
-        const dropLongitude = isFiniteCoordinate(payload.dropLongitude)
-          ? Number(payload.dropLongitude)
-          : pickupLongitude;
-
-        const nearbyDrivers = await getNearbyActiveDrivers(
-          pickupLatitude,
-          pickupLongitude,
-          Number(payload.radius || 10)
-        );
-
-        let driverId = payload.driverId;
-        if (!driverId) {
-          driverId = nearbyDrivers[0]?.driverId;
-        }
-
-        if (!driverId) {
-          throw new Error("No nearby driver available");
-        }
-
-        const route = await getRouteDetails({
-          origin: { latitude: pickupLatitude, longitude: pickupLongitude },
-          destination: { latitude: dropLatitude, longitude: dropLongitude },
-        });
-        const fare = calculateFare({
-          routeDistanceKm: route.distanceKm,
-          estimatedMinutes: route.estimatedMinutes,
-        });
-
-        const candidateDriverIds = nearbyDrivers.map((item) => item.driverId);
-        if (driverId && !candidateDriverIds.includes(driverId)) {
-          candidateDriverIds.unshift(driverId);
-        }
-
-        const ride = await createRide({
-          passengerId: socket.user.id,
-          driverId,
-          pickupLatitude,
-          pickupLongitude,
-          dropLatitude,
-          dropLongitude,
-          fareEstimate: fare.estimatedFare,
-          routeDistanceKm: route.distanceKm,
-          estimatedMinutes: route.estimatedMinutes,
-          routePolyline: route.polyline,
-          routeSteps: route.steps,
-          candidateDriverIds,
-        });
-
-        await publishRideRequest(ride);
-        scheduleRideTimeout(io, ride.rideId);
-
-        console.log("✅ Ride Published to Redis");
-        socket.emit("ride-requested", ride);
-        socket.emit("ride.requested", ride);
-      } catch (err) {
-        console.error("Publish Error:", err);
-        socket.emit("ride-error", { message: err.message });
-      }
+      console.log("Passengers Map:", [...passengerSockets.entries()].map(([k, s]) => [k, [...s]]));
     });
 
     /**
      * Driver Accepted
      */
     socket.on("ride-accepted", async (ride) => {
+       console.log("==============");
+       console.log("RIDE ACCEPT EVENT RECEIVED");
+       console.log(ride);
+       console.log(socket.user);
+
       if (socket.user?.role !== "driver") return;
       console.log("Ride Accepted:", ride);
       try {
@@ -259,14 +200,12 @@ async function initializeSocket(io) {
           nextStatus: "accepted",
         });
 
-        const passengerSocket = passengerSockets.get(updatedRide.passengerId);
-        if (passengerSocket) {
-          io.to(passengerSocket).emit("ride-confirmed", updatedRide);
-          io.to(passengerSocket).emit("ride-status-updated", updatedRide);
-          io.to(passengerSocket).emit("ride.accepted", updatedRide);
-        }
-        io.to(socket.id).emit("ride-status-updated", updatedRide);
-        io.to(socket.id).emit("ride.accepted", updatedRide);
+        io.to(updatedRide.passengerId).emit("ride-confirmed", updatedRide);
+        io.to(updatedRide.passengerId).emit("ride-status-updated", updatedRide);
+        io.to(updatedRide.passengerId).emit("ride.accepted", updatedRide);
+
+        io.to(updatedRide.driverId).emit("ride-status-updated", updatedRide);
+        io.to(updatedRide.driverId).emit("ride.accepted", updatedRide);
       } catch (err) {
         socket.emit("ride-error", { message: err.message, rideId: ride.rideId });
       }
@@ -283,11 +222,11 @@ async function initializeSocket(io) {
         if (!rideRecord) {
           throw new Error("Ride not found");
         }
-        const updatedRide = await tryDispatchNextDriver(io, rideRecord);
-        io.to(socket.id).emit("ride-status-updated", updatedRide);
-        if (updatedRide.status === "requested") {
-          scheduleRideTimeout(io, updatedRide.rideId);
+        if (rideRecord.driverId !== socket.user.id) {
+          throw new Error("Driver not allowed for this ride");
         }
+        const updatedRide = await tryDispatchNextDriver(io, rideRecord);
+        io.to(socket.user.id).emit("ride-status-updated", updatedRide);
       } catch (err) {
         socket.emit("ride-error", { message: err.message, rideId: ride.rideId });
       }
@@ -304,13 +243,11 @@ async function initializeSocket(io) {
           nextStatus: status,
         });
 
-        const passengerSocket = passengerSockets.get(updatedRide.passengerId);
-        if (passengerSocket) {
-          io.to(passengerSocket).emit("ride-status-updated", updatedRide);
-          io.to(passengerSocket).emit("ride.status.updated", updatedRide);
-        }
-        io.to(socket.id).emit("ride-status-updated", updatedRide);
-        io.to(socket.id).emit("ride.status.updated", updatedRide);
+        io.to(updatedRide.passengerId).emit("ride-status-updated", updatedRide);
+        io.to(updatedRide.passengerId).emit("ride.status.updated", updatedRide);
+
+        io.to(updatedRide.driverId).emit("ride-status-updated", updatedRide);
+        io.to(updatedRide.driverId).emit("ride.status.updated", updatedRide);
       } catch (err) {
         socket.emit("ride-error", { message: err.message, rideId });
       }
@@ -324,6 +261,8 @@ async function initializeSocket(io) {
       removeSocketFromMap(passengerSockets, socket.id);
 
       console.log("🔴 Disconnected:", socket.id);
+      console.log("Drivers Map:", [...driverSockets.entries()].map(([k, s]) => [k, [...s]]));
+      console.log("Reason:", socket.reason);
     });
   });
 }

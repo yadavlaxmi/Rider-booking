@@ -219,7 +219,9 @@ async function getNearbyActiveDrivers(latitude, longitude, radius = 10) {
     })
   );
 
-  return drivers.filter(Boolean);
+  return drivers
+    .filter(Boolean)
+    .sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity));
 }
 
 async function getDriverDistanceToPoint(driverId, latitude, longitude) {

@@ -4,16 +4,12 @@ import socket from "../socket/socket";
 import { connectSocket } from "../socket/socket";
 import MapPicker from "../components/MapPicker";
 import RouteMap from "../components/RouteMap";
+import { getCurrentUser } from "../services/session";
 
 function PassengerPage() {
-  const [passengerId, setPassengerId] = useState(() => {
-    const userRaw = localStorage.getItem("bike-booking-user");
-    try {
-      const user = userRaw ? JSON.parse(userRaw) : null;
-      return user?.role === "passenger" ? user.id : "";
-    } catch {
-      return "";
-    }
+  const [passengerId] = useState(() => {
+    const user = getCurrentUser();
+    return user?.role === "passenger" ? user.id : "";
   });
   const [latitude, setLatitude] = useState("");
   const [longitude, setLongitude] = useState("");
@@ -35,7 +31,7 @@ function PassengerPage() {
       try {
         const res = await api.get("/rides/me/active");
         setActiveRide(res.data?.ride || null);
-      } catch (error) {
+      } catch {
         setActiveRide(null);
       }
     };
@@ -58,12 +54,16 @@ function PassengerPage() {
   }, [passengerLabel]);
 
   useEffect(() => {
+    socket.onAny((event, data) => {
+    console.log("SOCKET EVENT =>", event, data);
+  });
+
     const describeRideStatus = (ride) => {
       switch (ride.status) {
         case "requested":
           return `Ride request sent to ${ride.driverId}. Waiting for driver response.`;
         case "accepted":
-          return `Driver ${ride.driverId} accepted your booking and is coming.`;
+          return `Your ride is booked. Driver ${ride.driverId} accepted and is coming.`;
         case "rejected":
           return `Driver ${ride.driverId} rejected your ride request.`;
         case "arrived":
@@ -126,14 +126,14 @@ function PassengerPage() {
       setBookingDriverId("");
     };
 
-    socket.on("ride-requested", handleRideRequested);
+    socket.on("ride-request", handleRideRequested);
     socket.on("ride-confirmed", handleRideConfirmed);
     socket.on("ride-rejected", handleRideRejected);
     socket.on("ride-status-updated", handleRideStatusUpdated);
     socket.on("ride-error", handleRideError);
 
     return () => {
-      socket.off("ride-requested", handleRideRequested);
+      socket.off("ride-request", handleRideRequested);
       socket.off("ride-confirmed", handleRideConfirmed);
       socket.off("ride-rejected", handleRideRejected);
       socket.off("ride-status-updated", handleRideStatusUpdated);
@@ -219,8 +219,6 @@ function PassengerPage() {
     });
 
     const ride = res.data.ride;
-
-    socket.emit("request-ride", ride);
 
     setActiveRide(ride);
     setBookingDriverId(ride.driverId);
@@ -403,15 +401,18 @@ function PassengerPage() {
           <div className="driver-grid">
             {drivers.map((driver) => {
               const isBooking = bookingDriverId === driver.driverId;
+              const isRecommended = driver.driverId === quote?.suggestedDriverId || driver === drivers[0];
 
               return (
                 <article className="driver-card" key={driver.driverId}>
                   <div className="driver-card__top">
                     <div>
                       <h3>{driver.driverId}</h3>
-                      <p>Active driver</p>
+                      <p>{isRecommended ? "Recommended nearest driver" : "Active driver"}</p>
                     </div>
-                    <span className="status-pill status-pill--active">active</span>
+                    <span className="status-pill status-pill--active">
+                      {isRecommended ? "recommended" : "active"}
+                    </span>
                   </div>
 
                   <div className="driver-meta">
@@ -429,7 +430,7 @@ function PassengerPage() {
                       onClick={() => bookDriver(driver)}
                       disabled={isBooking || Boolean(activeRide)}
                     >
-                      {activeRide ? "Ride active" : isBooking ? "Booking..." : "Book ride"}
+                      {activeRide ? "Ride active" : isBooking ? "Booking..." : isRecommended ? "Book recommended" : "Book ride"}
                     </button>
                   </div>
                 </article>

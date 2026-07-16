@@ -45,10 +45,17 @@ function generateUserId(role) {
   return `${role}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function createUser({ role, email, name, password }) {
+async function createUser({ role, email, name, password, adminSignupKey }) {
   const normalizedRole = String(role || "").trim().toLowerCase();
-  if (normalizedRole !== "driver" && normalizedRole !== "passenger") {
-    throw new Error("role must be driver or passenger");
+  if (!["driver", "passenger", "admin"].includes(normalizedRole)) {
+    throw new Error("role must be driver, passenger, or admin");
+  }
+
+  if (normalizedRole === "admin") {
+    const expectedKey = process.env.ADMIN_SIGNUP_KEY;
+    if (!expectedKey || adminSignupKey !== expectedKey) {
+      throw new Error("A valid admin signup key is required");
+    }
   }
 
   const emailLower = String(email || "").trim().toLowerCase();
@@ -105,4 +112,3 @@ module.exports = {
   getUserByEmail,
   verifyUserPassword,
 };
-

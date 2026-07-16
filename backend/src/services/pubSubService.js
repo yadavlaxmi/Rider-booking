@@ -8,6 +8,14 @@ const subscriber = createClient({
   url: process.env.REDIS_URL,
 });
 
+publisher.on("error", (error) => {
+  console.error("Redis publisher error:", error.message);
+});
+
+subscriber.on("error", (error) => {
+  console.error("Redis subscriber error:", error.message);
+});
+
 async function connectPubSub() {
   await publisher.connect();
   await subscriber.connect();

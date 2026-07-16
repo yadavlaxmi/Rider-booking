@@ -2,7 +2,13 @@ import { Routes, Route, Link, Navigate } from "react-router-dom";
 import DriverPage from "./pages/DriverPage";
 import PassengerPage from "./pages/PassengerPage";
 import AuthPage from "./pages/AuthPage";
+import AdminPage from "./pages/AdminPage";
+import { getCurrentUser } from "./services/session";
 import "./App.css";
+
+function RoleRoute({ role, children }) {
+  return getCurrentUser()?.role === role ? children : <Navigate to="/auth" replace />;
+}
 
 function App() {
   return (
@@ -24,6 +30,9 @@ function App() {
           <Link className="tab-button" to="/passenger">
             Passenger
           </Link>
+          <Link className="tab-button" to="/admin">
+            Admin
+          </Link>
         </div>
       </header>
 
@@ -31,9 +40,10 @@ function App() {
         <Route path="/" element={<Navigate to="/auth" />} />
 
         <Route path="/auth" element={<AuthPage />} />
-        <Route path="/driver" element={<DriverPage />} />
+        <Route path="/driver" element={<RoleRoute role="driver"><DriverPage /></RoleRoute>} />
 
-        <Route path="/passenger" element={<PassengerPage />} />
+        <Route path="/passenger" element={<RoleRoute role="passenger"><PassengerPage /></RoleRoute>} />
+        <Route path="/admin" element={<RoleRoute role="admin"><AdminPage /></RoleRoute>} />
       </Routes>
     </div>
   );

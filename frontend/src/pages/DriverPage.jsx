@@ -1,56 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import api from "../services/api";
 import socket from "../socket/socket";
 import { connectSocket } from "../socket/socket";
 import RouteMap from "../components/RouteMap";
+import MapPicker from "../components/MapPicker";
+import { getCurrentUser } from "../services/session";
 
 function DriverPage() {
   const [driverId, setDriverId] = useState(() => {
-    const userRaw = localStorage.getItem("bike-booking-user");
-    try {
-      const user = userRaw ? JSON.parse(userRaw) : null;
-      return user?.role === "driver" ? user.id : "";
-    } catch {
-      return "";
-    }
+    const user = getCurrentUser();
+    return user?.role === "driver" ? user.id : "";
   });
   const [latitude, setLatitude] = useState("");
   const [longitude, setLongitude] = useState("");
-  const [activeDrivers, setActiveDrivers] = useState([]);
-  const [inactiveDrivers, setInactiveDrivers] = useState([]);
   const [incomingRides, setIncomingRides] = useState([]);
   const [currentRide, setCurrentRide] = useState(null);
-  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState("");
 
-  const totalDrivers = useMemo(
-    () => activeDrivers.length + inactiveDrivers.length,
-    [activeDrivers.length, inactiveDrivers.length]
-  );
-  const currentDriverLocation = useMemo(
-    () => activeDrivers.find((driver) => driver.driverId === driverId) || null,
-    [activeDrivers, driverId]
-  );
-
-  const loadDrivers = async () => {
-    try {
-      setLoading(true);
-      setFeedback("");
-
-      const [activeRes, inactiveRes] = await Promise.all([
-        api.get("/drivers/active"),
-        api.get("/drivers/inactive"),
-      ]);
-
-      setActiveDrivers(activeRes.data.data || []);
-      setInactiveDrivers(inactiveRes.data.data || []);
-    } catch (error) {
-      setFeedback(error.response?.data?.message || "Could not load drivers");
-    } finally {
-      setLoading(false);
-    }
-  };
 
   useEffect(() => {
     const loadActiveRide = async () => {
@@ -61,12 +28,11 @@ function DriverPage() {
         if (ride?.status === "requested") {
           setIncomingRides([ride]);
         }
-      } catch (error) {
+      } catch {
         setCurrentRide(null);
       }
     };
 
-    loadDrivers();
     loadActiveRide();
   }, []);
 
@@ -198,70 +164,6 @@ function DriverPage() {
       setDriverId(driverId.trim());
       setLatitude("");
       setLongitude("");
-      await loadDrivers();
-    } catch (error) {
-      setFeedback(error.response?.data?.message || "Something went wrong");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const goOffline = async (selectedDriverId) => {
-    try {
-      setSaving(true);
-      setFeedback("");
-
-      const res = await api.post("/drivers/offline", {
-        driverId: selectedDriverId,
-      });
-
-      if (selectedDriverId === driverId) {
-        setIncomingRides([]);
-      }
-
-      setFeedback(res.data.message || "Driver marked inactive.");
-      await loadDrivers();
-    } catch (error) {
-      setFeedback(error.response?.data?.message || "Something went wrong");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const activateDriver = async (driver) => {
-    try {
-      setSaving(true);
-      setFeedback("");
-
-      const res = await api.post("/drivers/online", {
-        latitude: Number(driver.latitude),
-        longitude: Number(driver.longitude),
-      });
-
-      if (driver.driverId === driverId) {
-        connectSocket();
-        socket.emit("driver-online", driver.driverId);
-      }
-
-      setFeedback(res.data.message || "Driver activated.");
-      await loadDrivers();
-    } catch (error) {
-      setFeedback(error.response?.data?.message || "Something went wrong");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const deleteDriver = async (selectedDriverId) => {
-    try {
-      setSaving(true);
-      setFeedback("");
-
-      const res = await api.delete(`/drivers/${selectedDriverId}`);
-
-      setIncomingRides((current) => current.filter((ride) => ride.driverId !== selectedDriverId));
-      setFeedback(res.data.message || "Driver removed.");
-      await loadDrivers();
     } catch (error) {
       setFeedback(error.response?.data?.message || "Something went wrong");
     } finally {
@@ -270,13 +172,32 @@ function DriverPage() {
   };
 
   const respondToRide = (ride, accepted) => {
-    socket.emit(accepted ? "ride-accepted" : "ride-rejected", ride);
-    setIncomingRides((current) => current.filter((item) => item.rideId !== ride.rideId));
-    if (!accepted) {
-      setCurrentRide(null);
-    }
-    setFeedback(accepted ? "Accepting ride..." : "Rejecting ride...");
+     console.log("Sending:", ride);
+
+  const updatedRide = {
+    ...ride,
+    status: accepted ? "accepted" : "rejected",
   };
+
+  socket.emit(
+    accepted ? "ride-accepted" : "ride-rejected",
+    updatedRide
+  );
+
+  setIncomingRides((current) =>
+    current.filter((item) => item.rideId !== ride.rideId)
+  );
+
+  if (accepted) {
+    setCurrentRide(updatedRide);
+  } else {
+    setCurrentRide(null);
+  }
+
+  setFeedback(
+    accepted ? "Ride accepted." : "Ride rejected."
+  );
+};
 
   const updateCurrentRideStatus = async (status) => {
     if (!currentRide?.rideId) {
@@ -288,108 +209,18 @@ function DriverPage() {
     setTimeout(() => setSaving(false), 400);
   };
 
-  const DriverList = ({
-    title,
-    items,
-    emptyText,
-    actionLabel,
-    onAction,
-    secondaryActionLabel,
-    onSecondaryAction,
-  }) => (
-    <section className="panel panel-list">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">{title}</p>
-          <h2>{items.length} drivers</h2>
-        </div>
-        <button className="ghost-button" onClick={loadDrivers} type="button">
-          Refresh
-        </button>
-      </div>
-
-      {items.length === 0 ? (
-        <div className="empty-state">{emptyText}</div>
-      ) : (
-        <div className="driver-grid">
-          {items.map((driver) => (
-            <article className="driver-card" key={driver.driverId}>
-              <div className="driver-card__top">
-                <div>
-                  <h3>{driver.driverId}</h3>
-                  <p>{driver.status || title.toLowerCase()}</p>
-                </div>
-                <span
-                  className={`status-pill ${
-                    driver.status === "active"
-                      ? "status-pill--active"
-                      : "status-pill--inactive"
-                  }`}
-                >
-                  {driver.status || "unknown"}
-                </span>
-              </div>
-
-              <div className="driver-meta">
-                <span>Lat: {driver.latitude}</span>
-                <span>Lng: {driver.longitude}</span>
-              </div>
-
-              <div className="card-actions">
-                {onAction ? (
-                  <button
-                    className="primary-button"
-                    type="button"
-                    onClick={() => onAction(driver)}
-                    disabled={saving}
-                  >
-                    {actionLabel}
-                  </button>
-                ) : null}
-
-                {onSecondaryAction ? (
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={() => onSecondaryAction(driver.driverId)}
-                    disabled={saving}
-                  >
-                    {secondaryActionLabel}
-                  </button>
-                ) : null}
-              </div>
-            </article>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-
   return (
     <div className="page-shell">
       <section className="hero-card">
         <div className="hero-copy">
           <p className="eyebrow">Driver Control Center</p>
-          <h1>Active and inactive drivers from Redis</h1>
+          <h1>Manage your availability and ride requests</h1>
           <p className="hero-text">
-            Create a driver, mark it active or inactive, and respond to ride requests.
-            The dashboard refreshes automatically and keeps the status lists in sync.
+            Go online with your current location and respond to your incoming ride requests.
           </p>
         </div>
 
         <div className="hero-stats">
-          <div className="stat-card">
-            <span>Total</span>
-            <strong>{totalDrivers}</strong>
-          </div>
-          <div className="stat-card stat-card--active">
-            <span>Active</span>
-            <strong>{activeDrivers.length}</strong>
-          </div>
-          <div className="stat-card stat-card--inactive">
-            <span>Inactive</span>
-            <strong>{inactiveDrivers.length}</strong>
-          </div>
           <div className="stat-card">
             <span>Ride</span>
             <strong>{currentRide?.status || "none"}</strong>
@@ -403,9 +234,6 @@ function DriverPage() {
             <p className="eyebrow">Add driver</p>
             <h2>Bring a driver online</h2>
           </div>
-          <button className="ghost-button" onClick={loadDrivers} type="button">
-            {loading ? "Loading..." : "Sync Redis"}
-          </button>
         </div>
 
         <div className="form-grid">
@@ -419,20 +247,20 @@ function DriverPage() {
           </label>
 
           <label>
-            <span>Latitude</span>
+            <span>Latitude (select from map)</span>
             <input
               value={latitude}
-              onChange={(event) => setLatitude(event.target.value)}
               placeholder="28.6200"
+              readOnly
             />
           </label>
 
           <label>
-            <span>Longitude</span>
+            <span>Longitude (select from map)</span>
             <input
               value={longitude}
-              onChange={(event) => setLongitude(event.target.value)}
               placeholder="77.2100"
+              readOnly
             />
           </label>
 
@@ -459,6 +287,16 @@ function DriverPage() {
             </button>
           </div>
         </div>
+
+        <MapPicker
+          title="Choose your current location"
+          latitude={latitude}
+          longitude={longitude}
+          onSelect={({ latitude: nextLatitude, longitude: nextLongitude }) => {
+            setLatitude(String(nextLatitude));
+            setLongitude(String(nextLongitude));
+          }}
+        />
 
         {feedback ? <div className="feedback-banner">{feedback}</div> : null}
         {currentRide ? (
@@ -576,35 +414,10 @@ function DriverPage() {
             ? { latitude: currentRide.dropLatitude, longitude: currentRide.dropLongitude }
             : null
         }
-        driver={
-          currentDriverLocation
-            ? { latitude: currentDriverLocation.latitude, longitude: currentDriverLocation.longitude }
-            : null
-        }
+        driver={null}
         polyline={currentRide?.routePolyline || []}
       />
 
-      <div className="dashboard-grid">
-        <DriverList
-          title="Active drivers"
-          items={activeDrivers}
-          emptyText="No active drivers in Redis yet."
-          actionLabel="Set Offline"
-          onAction={(driver) => goOffline(driver.driverId)}
-          secondaryActionLabel="Delete"
-          onSecondaryAction={deleteDriver}
-        />
-
-        <DriverList
-          title="Inactive drivers"
-          items={inactiveDrivers}
-          emptyText="No inactive drivers found."
-          actionLabel="Set Online"
-          onAction={activateDriver}
-          secondaryActionLabel="Delete"
-          onSecondaryAction={deleteDriver}
-        />
-      </div>
     </div>
   );
 }

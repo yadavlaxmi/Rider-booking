@@ -13,9 +13,9 @@ const {
   deleteDriver,
 } = require("../controllers/driverController");
 
-router.get("/all", authenticate, getDrivers);
-router.get("/active", authenticate, getActiveDriversHandler);
-router.get("/inactive", authenticate, getInactiveDriversHandler);
+router.get("/all", authenticate, requireRole("admin"), getDrivers);
+router.get("/active", authenticate, requireRole("admin"), getActiveDriversHandler);
+router.get("/inactive", authenticate, requireRole("admin"), getInactiveDriversHandler);
 
 router.post("/online", authenticate, requireRole("driver"), goOnline);
 router.post("/offline", authenticate, requireRole("driver"), goOffline);

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../services/api";
 import { connectSocket, disconnectSocket } from "../socket/socket";
+import { clearSession, saveSession } from "../services/session";
 
 function AuthPage() {
   const navigate = useNavigate();
@@ -21,7 +22,7 @@ function AuthPage() {
       const payload =
         mode === "signup"
           ? { role, email, name, password }
-          : { email, password };
+          : { role, email, password };
 
       const res = await api.post(`/auth/${mode}`, payload);
       const token = res.data?.token;
@@ -31,14 +32,19 @@ function AuthPage() {
         throw new Error("Invalid auth response");
       }
 
-      localStorage.setItem("bike-booking-token", token);
-      localStorage.setItem("bike-booking-user", JSON.stringify(user));
+      saveSession({ token, user });
 
       // ensure socket reconnects with fresh token
       disconnectSocket();
       connectSocket();
 
-      navigate(user.role === "driver" ? "/driver" : "/passenger");
+      navigate(
+        user.role === "admin"
+          ? "/admin"
+          : user.role === "driver"
+            ? "/driver"
+            : "/passenger"
+      );
     } catch (err) {
       setError(err.response?.data?.message || err.message || "Authentication failed");
     } finally {
@@ -81,17 +87,14 @@ function AuthPage() {
         </div>
 
         <div className="form-grid form-grid--three">
-          {mode === "signup" ? (
-            <label>
-              <span>Role</span>
-              <select value={role} onChange={(e) => setRole(e.target.value)}>
-                <option value="passenger">Passenger</option>
-                <option value="driver">Driver</option>
-              </select>
-            </label>
-          ) : (
-            <div />
-          )}
+          <label>
+            <span>{mode === "login" ? "Login as" : "Role"}</span>
+            <select value={role} onChange={(e) => setRole(e.target.value)}>
+              <option value="passenger">Passenger</option>
+              <option value="driver">Driver</option>
+              {mode === "login" ? <option value="admin">Admin</option> : null}
+            </select>
+          </label>
 
           <label>
             <span>Email</span>
@@ -125,8 +128,7 @@ function AuthPage() {
               className="secondary-button"
               type="button"
               onClick={() => {
-                localStorage.removeItem("bike-booking-token");
-                localStorage.removeItem("bike-booking-user");
+                clearSession();
                 disconnectSocket();
                 setError("");
               }}
@@ -143,4 +145,3 @@ function AuthPage() {
 }
 
 export default AuthPage;
-
